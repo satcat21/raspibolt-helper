@@ -1,0 +1,97 @@
+# ============================================================
+# RaspiBolt updater configuration  --  optional
+#
+# Install as /etc/raspibolt-updater.conf, owned by root and readable
+# by nobody else (both scripts refuse to source it otherwise):
+#
+#   install -m 600 -o root -g root \
+#       raspibolt-updater.conf.example /etc/raspibolt-updater.conf
+#
+# Both raspibolt-updater.sh ("update") and raspibolt-updater-check.sh
+# ("update-check") source this file after their own defaults, so the
+# two always agree on where things live. Everything here is optional:
+# with no config file at all, or with every line below commented out,
+# both scripts behave exactly as they do today.
+#
+# It is sourced as bash, so it can assign into the associative arrays
+# the scripts declare. Set only the entries that differ from the
+# stock RaspiBolt layout -- an entry you do not mention keeps its
+# default.
+# ============================================================
+
+# ------------------------------------------------------------
+# Source / build directories
+# ------------------------------------------------------------
+# Defaults:
+#   electrs          /home/admin/rust/electrs
+#   btcrpcexplorer   /home/btcrpcexplorer/btc-rpc-explorer
+#   rtl              /home/rtl/RTL
+#   mempool          /home/mempool/mempool
+#   bos              /home/bos/balanceofsatoshis
+#   circuitbreaker   /home/circuitbreaker/circuitbreaker
+
+# APP_SRC_DIR[electrs]="/home/admin/rust/electrs"
+# APP_SRC_DIR[mempool]="/opt/mempool"
+
+# ------------------------------------------------------------
+# Linux user that owns and builds each source tree
+# ------------------------------------------------------------
+# Defaults: electrs=admin, and otherwise a user named after the app
+# (btcrpcexplorer, rtl, mempool, bos, circuitbreaker). Electrs is the
+# odd one out because the guide builds it from the admin account even
+# though the compiled binary runs as the "electrs" service user.
+
+# APP_BUILD_USER[electrs]="admin"
+# APP_BUILD_USER[rtl]="lightning"
+
+# ------------------------------------------------------------
+# systemd service names
+# ------------------------------------------------------------
+# Defaults: bitcoind, electrs, btcrpcexplorer, lnd, rtl, mempool,
+# bos-telegram, circuitbreaker.
+
+# APP_SERVICE[rtl]="ridethelightning"
+# APP_SERVICE[bos]="bos-telegram"
+
+# ------------------------------------------------------------
+# Architecture  --  updater only
+# ------------------------------------------------------------
+# Leave these unset unless you have a reason not to. The updater
+# derives them from `uname -m`, which cannot go stale the way a
+# written-down value can:
+#
+#   x86_64   ->  BITCOIN_ARCH=x86_64-linux-gnu   LND_ARCH=amd64
+#   aarch64  ->  BITCOIN_ARCH=aarch64-linux-gnu  LND_ARCH=arm64
+#
+# Set them only where detection cannot answer correctly: a 32-bit
+# userland on a 64-bit kernel, or an architecture the case statement
+# does not map (armv7l, riscv64), where the updater otherwise stops
+# and tells you to set these.
+#
+# BITCOIN_ARCH: the middle part of the bitcoincore.org tarball name,
+#   bitcoin-<version>-<BITCOIN_ARCH>.tar.gz
+# LND_ARCH: the middle part of the LND release asset name,
+#   lnd-linux-<LND_ARCH>-<version>.tar.gz
+#   (valid values upstream: amd64, arm64, armv6, armv7, 386)
+
+# BITCOIN_ARCH="x86_64-linux-gnu"
+# LND_ARCH="amd64"
+
+# ------------------------------------------------------------
+# LND release signers  --  updater only
+# ------------------------------------------------------------
+# LND releases are signed by a rotating subset of maintainers, not by
+# a fixed key. The updater walks this list, takes the first
+# manifest-<signer>-<version>.sig that exists for the release, and
+# verifies it against that signer's key from upstream
+# scripts/keys/<signer>.asc. Override only to change the order, or to
+# restrict verification to signers you personally trust.
+
+# LND_SIGNERS=(guggero roasbeef ziggie1984)
+
+# ------------------------------------------------------------
+# Misc  --  updater only
+# ------------------------------------------------------------
+
+# BACKUP_ROOT="/root/raspibolt-updater-backups"
+# LOG_LINES=30
