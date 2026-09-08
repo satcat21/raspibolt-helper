@@ -332,6 +332,119 @@ check_clean_worktree() {
     return 0
 }
 
+# Check the GPG signature on a Git tag and report what is actually
+# wrong when it does not verify.
+#
+# 'git verify-tag' exits non-zero for anything short of a fully valid
+# signature, which lumps a forged tag in with the far more common
+# cases of a key that was never imported or whose validity date has
+# lapsed. Those need very different responses, so the raw GnuPG
+# status lines are used to tell them apart.
+#
+# A forged or revoked signature aborts the whole run. Everything
+# else prompts and returns 1 on refusal, so the caller can skip that
+# app and carry on with the rest.
+verify_git_tag() {
+    local user="$1" dir="$2" tag="$3"
+    local raw human keyid
+
+    raw="$(
+        sudo -u "$user" -H git -C "$dir" verify-tag --raw "$tag" 2>/dev/null \
+            || true
+    )"
+
+    human="$(
+        sudo -u "$user" -H git -C "$dir" verify-tag "$tag" 2>&1 \
+            || true
+    )"
+
+    if grep -q '^\[GNUPG:\] BADSIG' <<< "$raw"; then
+        error "BAD GPG signature on tag ${tag}."
+        echo
+        echo "$human"
+        echo
+        die "Update aborted: the tag signature does not match its contents."
+    fi
+
+    if grep -q '^\[GNUPG:\] REVKEYSIG' <<< "$raw"; then
+        error "Tag ${tag} is signed with a REVOKED key."
+        echo
+        echo "$human"
+        echo
+        die "Update aborted: the signing key has been revoked."
+    fi
+
+    if grep -qE '^\[GNUPG:\] (GOODSIG|VALIDSIG)' <<< "$raw" \
+        && ! grep -q '^\[GNUPG:\] EXPKEYSIG' <<< "$raw"; then
+
+        success "Tag ${tag} carries a valid GPG signature."
+        return 0
+    fi
+
+    # Good signature, lapsed key. The signature is intact and the key
+    # is the same one that signed earlier releases; only the owner's
+    # stated validity period has run out. Not evidence of tampering.
+    if grep -q '^\[GNUPG:\] EXPKEYSIG' <<< "$raw"; then
+
+        warning "Tag ${tag} has a VALID signature from an EXPIRED key."
+        echo
+        echo "$human"
+        echo
+        info "The signature itself is intact. The maintainer let the key's"
+        info "validity date lapse; renewing it is upstream's job."
+        info "Confirm the fingerprint matches the one on previous releases:"
+        echo
+        echo "  sudo -u $user -H git -C $dir verify-tag <previous-tag>"
+        echo
+
+        if confirm "Accept the expired-key signature and continue?" "Y"; then
+            return 0
+        fi
+
+        return 1
+    fi
+
+    if grep -qE '^\[GNUPG:\] (NO_PUBKEY|ERRSIG)' <<< "$raw"; then
+
+        keyid="$(
+            awk '/^\[GNUPG:\] (NO_PUBKEY|ERRSIG)/ { print $3; exit }' <<< "$raw"
+        )"
+
+        warning "The key that signed tag ${tag} is not in ${user}'s keyring,"
+        warning "so the signature could not be checked at all."
+
+        if [[ -n "$keyid" ]]; then
+            echo
+            echo "  Missing key: $keyid"
+            echo
+            echo "  Import it into the right keyring with:"
+            echo
+            echo "    sudo -u $user -H gpg \\"
+            echo "        --keyserver hkps://keys.openpgp.org \\"
+            echo "        --recv-keys $keyid"
+        fi
+
+        echo
+
+        if confirm "Continue WITHOUT verifying the signature?" "N"; then
+            return 0
+        fi
+
+        return 1
+    fi
+
+    warning "Tag ${tag} carries no GPG signature."
+    echo
+    echo "$human"
+    echo
+
+    if confirm "Continue WITHOUT a signature?" "N"; then
+        return 0
+    fi
+
+    return 1
+}
+
 # ------------------------------------------------------------
 # Root check
 # ------------------------------------------------------------
@@ -733,14 +846,16 @@ update_electrs() {
     info "Fetching electrs source..."
     sudo -u "$user" git -C "$dir" fetch --tags
 
+    # Verified before checkout, so a refusal leaves the existing
+    # working tree and the running binary untouched.
+    if ! verify_git_tag "$user" "$dir" "$latest"; then
+        warning "Electrs update skipped; nothing was changed."
+        return 1
+    fi
+
     info "Cleaning working tree and checking out ${latest}..."
     sudo -u "$user" git -C "$dir" clean -xfd
     sudo -u "$user" git -C "$dir" checkout "$latest"
-
-    if ! sudo -u "$user" git -C "$dir" verify-tag "$latest" 2>&1; then
-        warning "GPG signature on tag ${latest} could not be verified (romanz's key may not be imported)."
-        confirm "Continue anyway?" "N" || die "Update aborted: signature verification failed."
-    fi
 
     info "Building electrs (cargo build --release, this can take a while)..."
     run_as "$user" "cd '$dir' && cargo clean && cargo build --locked --release"
@@ -780,13 +895,16 @@ update_git_npm_app() {
     sudo -u "$user" git -C "$dir" fetch --tags
     sudo -u "$user" git -C "$dir" reset --hard HEAD
 
+    # Verified before checkout: a refusal must not leave the tree
+    # sitting on unverified code with the service shut down.
+    if ! verify_git_tag "$user" "$dir" "$latest"; then
+        warning "$name update skipped; restoring the previous version."
+        start_and_check_service "$service"
+        return 1
+    fi
+
     info "Checking out ${latest}..."
     sudo -u "$user" git -C "$dir" checkout "$latest"
-
-    if ! sudo -u "$user" git -C "$dir" verify-tag "$latest" >/dev/null 2>&1; then
-        warning "GPG signature on tag ${latest} could not be verified (maintainer key may not be imported)."
-        confirm "Continue anyway?" "N" || die "Update aborted: signature verification failed."
-    fi
 
     info "Installing dependencies ($npm_cmd)..."
     run_as "$user" "cd '$dir' && $npm_cmd"
@@ -836,6 +954,13 @@ update_mempool() {
     info "Fetching mempool source..."
     sudo -u "$user" git -C "$dir" fetch --tags
     sudo -u "$user" git -C "$dir" reset --hard HEAD
+
+    if ! verify_git_tag "$user" "$dir" "$latest"; then
+        warning "Mempool update skipped; restoring the previous version."
+        start_and_check_service "${APP_SERVICE[mempool]}"
+        return 1
+    fi
+
     sudo -u "$user" git -C "$dir" checkout "$latest"
 
     info "Building mempool backend..."
