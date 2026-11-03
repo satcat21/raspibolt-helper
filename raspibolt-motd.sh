@@ -706,7 +706,7 @@ if [ "$electrs_status" = "enabled" ]; then
     eserver_running="up"
     eserver_color="${color_green}"
     # Request params are client_name, protocol_version. Example result being parsed: ["Electrs 0.9.10", "1.4"]
-    electrspi=$(echo '{"jsonrpc": "2.0", "method": "server.version", "params": [ "raspibolt", "1.4" ], "id": 0}' | netcat 127.0.0.1 50001 -q 1 | jq -r '.result[0]' | awk '{print "v"substr($1,9)}')
+    electrspi=$(echo '{"jsonrpc": "2.0", "method": "server.version", "params": [ "raspibolt", "1.4" ], "id": 0}' | netcat 127.0.0.1 50001 -q 1 | jq -r '.result[0]' | awk '{print "v"substr($0,9)}')
     if [ "$electrspi" = "$electrsgit" ]; then
       eserver_version="$electrspi"
       eserver_version_color="${color_green}"
