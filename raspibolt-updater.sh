@@ -168,6 +168,12 @@ LND_SIGNERS=(
     ffranr
 )
 
+# Exit code an update function returns when the user declined
+# something mid-update (dirty worktree, unverifiable tag signature),
+# so the main loop can tell a deliberate skip from a failure. Chosen
+# well outside the codes curl, git, npm and friends exit with.
+UPDATE_SKIPPED=200
+
 BACKUP_ROOT="/root/raspibolt-updater-backups"
 LOG_LINES=30
 
@@ -556,30 +562,55 @@ fi
 # Latest-version lookups
 # ------------------------------------------------------------
 
+# Prints the newest tag of $repo matching $pattern, or the newest
+# $count of them (newest first) when a count is given.
 gh_latest_tag() {
-    local repo="$1" pattern="$2"
-    local response
+    local repo="$1" pattern="$2" count="${3:-1}"
 
-    response="$(
-        curl \
-            --fail \
-            --silent \
-            --show-error \
-            --location \
-            --retry 2 \
-            --connect-timeout 10 \
-            --max-time 20 \
-            -H "User-Agent: raspibolt-updater" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${repo}/tags?per_page=100" \
-            2>/dev/null
-    )" || { echo ""; return; }
-
-    jq -r '.[].name' <<<"$response" 2>/dev/null |
+    # Use the git protocol rather than the GitHub REST API: the API caps
+    # unauthenticated clients at 60 requests/hour per IP (shared with the
+    # MOTD), and once that is used up every lookup here fails. ls-remote
+    # is not subject to that limit and also lists all tags, not just 100.
+    GIT_TERMINAL_PROMPT=0 timeout 30 git ls-remote --tags --refs \
+        "https://github.com/${repo}.git" 2>/dev/null |
+        awk '{sub("^refs/tags/", "", $2); print $2}' |
         grep -E "$pattern" |
         grep -viE 'rc[0-9]*$' |
-        sort -V |
-        tail -n1
+        sort -rV |
+        head -n "$count"
+}
+
+# Bitcoin Core and LND are installed from prebuilt release files,
+# which upstream publishes some time after pushing the tag (LND's
+# v0.21.6-beta was tagged before its binaries appeared). A tag
+# without them cannot be installed, so check that its checksum file
+# -- the same for every architecture -- is downloadable.
+release_published() {
+    local app="$1" tag="$2" url
+
+    case "$app" in
+        bitcoin) url="https://bitcoincore.org/bin/bitcoin-core-${tag#v}/SHA256SUMS" ;;
+        lnd) url="https://github.com/lightningnetwork/lnd/releases/download/${tag}/manifest-${tag}.txt" ;;
+        *) return 0 ;;
+    esac
+
+    curl --fail --silent --location --head \
+        --connect-timeout 10 --max-time 20 \
+        -o /dev/null "$url"
+}
+
+# Newest tag whose release files are published; only the three
+# newest tags are tried, so an outage cannot turn into a long crawl.
+latest_published_release() {
+    local app="$1" tag
+
+    while read -r tag; do
+        if release_published "$app" "$tag"; then
+            echo "$tag"
+            return
+        fi
+        info "${APP_NAME[$app]} ${tag} is tagged, but its release files are not published yet." >&2
+    done < <(gh_latest_tag "${APP_GH_REPO[$app]}" "${APP_TAG_PATTERN[$app]}" 3)
 }
 
 latest_circuitbreaker() {
@@ -592,10 +623,10 @@ latest_circuitbreaker() {
 get_latest_version() {
     local app="$1"
 
-    if [[ "$app" == "circuitbreaker" ]]; then
-        latest_circuitbreaker
-        return
-    fi
+    case "$app" in
+        circuitbreaker) latest_circuitbreaker; return ;;
+        bitcoin|lnd) latest_published_release "$app"; return ;;
+    esac
 
     gh_latest_tag "${APP_GH_REPO[$app]}" "${APP_TAG_PATTERN[$app]}"
 }
@@ -841,7 +872,7 @@ update_electrs() {
     [[ -d "$dir/.git" ]] \
         || die "Electrs source directory not found: $dir (adjust APP_SRC_DIR[electrs] if your install differs)"
 
-    check_clean_worktree "electrs" || { warning "Electrs update skipped."; return 1; }
+    check_clean_worktree "electrs" || { warning "Electrs update skipped."; return "$UPDATE_SKIPPED"; }
 
     info "Fetching electrs source..."
     sudo -u "$user" git -C "$dir" fetch --tags
@@ -850,7 +881,7 @@ update_electrs() {
     # working tree and the running binary untouched.
     if ! verify_git_tag "$user" "$dir" "$latest"; then
         warning "Electrs update skipped; nothing was changed."
-        return 1
+        return "$UPDATE_SKIPPED"
     fi
 
     info "Cleaning working tree and checking out ${latest}..."
@@ -887,7 +918,7 @@ update_git_npm_app() {
     [[ -d "$dir/.git" ]] \
         || die "$name source directory not found: $dir (adjust APP_SRC_DIR[$app] if your install differs)"
 
-    check_clean_worktree "$app" || { warning "$name update skipped."; return 1; }
+    check_clean_worktree "$app" || { warning "$name update skipped."; return "$UPDATE_SKIPPED"; }
 
     stop_service "$service"
 
@@ -900,7 +931,7 @@ update_git_npm_app() {
     if ! verify_git_tag "$user" "$dir" "$latest"; then
         warning "$name update skipped; restoring the previous version."
         start_and_check_service "$service"
-        return 1
+        return "$UPDATE_SKIPPED"
     fi
 
     info "Checking out ${latest}..."
@@ -947,7 +978,7 @@ update_mempool() {
     echo "  https://github.com/mempool/mempool/releases/tag/${latest}"
     echo
 
-    check_clean_worktree "mempool" || { warning "Mempool update skipped."; return 1; }
+    check_clean_worktree "mempool" || { warning "Mempool update skipped."; return "$UPDATE_SKIPPED"; }
 
     stop_service "${APP_SERVICE[mempool]}"
 
@@ -958,7 +989,7 @@ update_mempool() {
     if ! verify_git_tag "$user" "$dir" "$latest"; then
         warning "Mempool update skipped; restoring the previous version."
         start_and_check_service "${APP_SERVICE[mempool]}"
-        return 1
+        return "$UPDATE_SKIPPED"
     fi
 
     sudo -u "$user" git -C "$dir" checkout "$latest"
@@ -989,7 +1020,7 @@ update_circuitbreaker() {
     echo "  Review recent commits before upgrading: https://github.com/lightningequipment/circuitbreaker/commits/master"
     echo
 
-    check_clean_worktree "circuitbreaker" || { warning "Circuit Breaker update skipped."; return 1; }
+    check_clean_worktree "circuitbreaker" || { warning "Circuit Breaker update skipped."; return "$UPDATE_SKIPPED"; }
 
     stop_service "${APP_SERVICE[circuitbreaker]}"
 
@@ -1073,11 +1104,26 @@ for app in "${APP_ORDER[@]}"; do
         continue
     fi
 
-    if run_update "$app" "$latest"; then
-        RESULT[$app]="updated to $latest"
-    else
-        RESULT[$app]="skipped"
-    fi
+    # Not `if run_update ...`: bash disables set -e for everything
+    # called from an if/||/&& condition, so a failed download or build
+    # would run straight on -- stopping the service, "installing"
+    # nothing and reporting success. In a subshell outside any
+    # condition, set -e applies again; the EXIT trap is re-armed
+    # because subshells do not inherit it.
+    set +e
+    (
+        set -e
+        trap cleanup_on_exit EXIT
+        run_update "$app" "$latest"
+    )
+    rc=$?
+    set -e
+
+    case "$rc" in
+        0) RESULT[$app]="updated to $latest" ;;
+        "$UPDATE_SKIPPED") RESULT[$app]="skipped" ;;
+        *) die "$name update failed (exit code $rc). Stopping here; check ${APP_SERVICE[$app]:-the app} before re-running." ;;
+    esac
 done
 
 # ------------------------------------------------------------

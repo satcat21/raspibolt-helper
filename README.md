@@ -83,11 +83,15 @@ on to the next one. Finishes with `apt update` / `upgrade` / `autoremove`.
   SHA256-checked and GPG-verified before their binaries replace the ones
   in `/usr/local/bin` (the old ones are kept as `.old`). LND additionally
   prompts you to confirm you have read the release notes and have a
-  current channel backup.
+  current channel backup. A new version is only offered once its release
+  files are actually published, not as soon as the tag appears.
 - **Everything else** is a Git checkout: `git fetch` + `git checkout <tag>`
   and a rebuild (`cargo` / `npm` / `go`), each run as that application's
   own Linux user, exactly as a human following the guide would. Circuit
-  Breaker has no upstream tags, so it tracks `master` by commit.
+  Breaker has no upstream tags, so it tracks `master` by commit. The
+  tag's GPG signature is checked before checkout: a bad or revoked
+  signature aborts the run, while a missing key, an expired key or an
+  unsigned tag asks before continuing, and declining skips just that app.
 - A hard failure inside one application -- bad checksum, failed build, a
   service that will not come back up -- **stops the script** rather than
   carrying on to the next one. Re-running is safe: anything already on the

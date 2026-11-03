@@ -265,7 +265,11 @@ fetch_githubversion_lightning() {
   ln_git_version=$(curl -s --connect-timeout 5 $ln_git_repo_url | jq -r '.tag_name | select(.!=null)')
 }
 fetch_githubversion_electrs() {
-  electrsgit=$(curl -s --connect-timeout 5 https://api.github.com/repos/romanz/electrs/releases/latest | jq -r '.tag_name | select(.!=null)')
+  # electrs has no GitHub Releases (only tags), so /releases/latest
+  # comes back empty/stale; list tags via git ls-remote (not
+  # rate-limited like the REST API) and pick the highest vX.Y.Z tag
+  # instead, same as raspibolt-updater-check.sh does.
+  electrsgit=$(GIT_TERMINAL_PROMPT=0 timeout 10 git ls-remote --tags --refs "https://github.com/romanz/electrs.git" 2>/dev/null | awk '{sub("^refs/tags/", "", $2); print $2}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
 }
 fetch_githubversion_btcrpcexplorer() {
   btcrpcexplorergit=$(curl -s --connect-timeout 5 https://api.github.com/repos/janoside/btc-rpc-explorer/releases/latest | jq -r '.tag_name | select(.!=null)')
@@ -291,9 +295,9 @@ fetch_githubversion_mempool() {
 fetch_githubversion_bos() {
   # balanceofsatoshis has no GitHub Releases (only tags), so
   # /releases/latest always comes back empty for it; use the tags
-  # API and pick the highest vX.Y.Z tag instead, same as
-  # raspibolt-updater-check.sh does.
-  bosgit=$(curl -s --connect-timeout 5 "https://api.github.com/repos/alexbosworth/balanceofsatoshis/tags?per_page=100" | jq -r '.[].name' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+  # via git ls-remote (not rate-limited like the REST API) and pick
+  # the highest vX.Y.Z tag instead, same as raspibolt-updater-check.sh does.
+  bosgit=$(GIT_TERMINAL_PROMPT=0 timeout 10 git ls-remote --tags --refs "https://github.com/alexbosworth/balanceofsatoshis.git" 2>/dev/null | awk '{sub("^refs/tags/", "", $2); print $2}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
 }
 fetch_githubversion_circuitbreaker() {
   # Circuit Breaker has no tagged releases upstream; it tracks the master
